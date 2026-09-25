@@ -17,22 +17,19 @@ app.get('/', (req, res) => {
     res.status(200).send('🤖 Twilio WhatsApp ATS Bot is running 24/7!');
 });
 
-// Twilio Webhook Endpoint
 app.post('/webhook', async (req, res) => {
     const incomingMsg = req.body.Body ? req.body.Body.trim() : '';
-    const senderID = req.body.From; // e.g., 'whatsapp:+919032980320'
+    const senderID = req.body.From;
     const numMedia = parseInt(req.body.NumMedia || '0', 10);
     
     let session = userSessions.get(senderID) || { step: 'WAITING_FOR_RESUME' };
     const twiml = new twilio.twiml.MessagingResponse();
 
     try {
-        // Handle incoming PDF or Word document from Twilio
         if (numMedia > 0 && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
             const mediaUrl = req.body.MediaUrl0;
             const contentType = req.body.MediaContentType0 || '';
 
-            // Download file from Twilio using HTTP Basic Auth
             const response = await axios.get(mediaUrl, {
                 responseType: 'arraybuffer',
                 auth: {
@@ -64,7 +61,6 @@ app.post('/webhook', async (req, res) => {
 
             twiml.message('📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.');
         } 
-        // Handle Job Description Text Input
         else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
             if (!incomingMsg) {
                 twiml.message('⚠️ Please send a valid text Job Description.');
@@ -75,7 +71,6 @@ app.post('/webhook', async (req, res) => {
             session.jobDescription = incomingMsg;
             userSessions.set(senderID, session);
 
-            // Run Gemini AI Evaluation
             const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
 
             session.step = 'CHOICE_MENU';
@@ -83,7 +78,6 @@ app.post('/webhook', async (req, res) => {
 
             twiml.message(evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)");
         } 
-        // Handle Post-Score Menu
         else if (session.step === 'CHOICE_MENU') {
             if (incomingMsg === '2') {
                 session.step = 'WAITING_FOR_NEW_JD';
@@ -95,25 +89,25 @@ app.post('/webhook', async (req, res) => {
                 twiml.message('👋 Please upload your resume as a *PDF or Word document* to get started.');
             }
         } 
-        // Default / Welcome State
         else {
             userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
             twiml.message('👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.');
         }
 
     } catch (error) {
-        console.error("Webhook processing error:", error);
+        console.error("Webhook processing error details:", error);
         userSessions.delete(senderID);
-        twiml.message('❌ An error occurred. Send any message to restart.');
+        // Display exact error message for quick debugging
+        twiml.message(`❌ Error: ${error.message || 'An error occurred. Send any message to restart.'}`);
     }
 
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twiml.toString());
 });
 
-// Rigorous ATS Evaluation using gemini-3.1-flash-lite
+// Rigorous ATS Evaluation using gemini-1.5-flash
 async function evaluateWithGemini(resumeText, jobDescription) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `
     You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
