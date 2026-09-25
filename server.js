@@ -8,7 +8,6 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, download
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 
-// 1. Express server for Render health check
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -20,11 +19,9 @@ app.listen(PORT, () => {
     console.log(`🚀 Express server running on port ${PORT}`);
 });
 
-// 2. Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const userSessions = new Map();
 
-// 3. Start Baileys WhatsApp Connection
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
@@ -54,7 +51,6 @@ async function connectToWhatsApp() {
         }
     });
 
-    // Handle Incoming Messages
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
@@ -67,11 +63,28 @@ async function connectToWhatsApp() {
                              msg.message.documentMessage?.caption || '';
         
         const trimmedText = incomingText.trim();
-        let session = userSessions.get(senderID) || { step: 'WAITING_FOR_RESUME' };
+        const documentMessage = msg.message.documentMessage;
+
+        let session = userSessions.get(senderID);
+
+        // 🛡️ TRIGGER CHECK: If no active session, ignore unless they type '!ats'
+        if (!session) {
+            if (trimmedText.toLowerCase() === '!ats') {
+                session = { step: 'WAITING_FOR_RESUME' };
+                userSessions.set(senderID, session);
+                await sock.sendMessage(senderID, { text: '🤖 *ATS Bot Activated!*\n\nPlease upload your resume as a *PDF or Word document* to get started.\n\n*(Type **!exit** anytime to quit)*' });
+            }
+            return; // Completely ignore normal personal messages!
+        }
+
+        // Allow user to exit the bot session anytime
+        if (trimmedText.toLowerCase() === '!exit') {
+            userSessions.delete(senderID);
+            await sock.sendMessage(senderID, { text: '❌ ATS Bot session closed. Your personal chat is back to normal.' });
+            return;
+        }
 
         try {
-            const documentMessage = msg.message.documentMessage;
-
             if (documentMessage && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
                 await sock.sendMessage(senderID, { text: '⏳ Downloading and analyzing your resume structure...' });
 
@@ -121,7 +134,7 @@ async function connectToWhatsApp() {
                 userSessions.set(senderID, session);
 
                 await sock.sendMessage(senderID, { 
-                    text: evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)" 
+                    text: evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)\n3️⃣ Exit Bot (Reply with *!exit*)" 
                 });
             } 
             else if (session.step === 'CHOICE_MENU') {
@@ -137,13 +150,13 @@ async function connectToWhatsApp() {
             } 
             else {
                 userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
-                await sock.sendMessage(senderID, { text: '👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.' });
+                await sock.sendMessage(senderID, { text: '🤖 Please upload your resume as a *PDF or Word document* to get started.' });
             }
 
         } catch (error) {
             console.error("Error processing message:", error);
             userSessions.delete(senderID);
-            await sock.sendMessage(senderID, { text: '❌ An error occurred. Send anything to restart.' });
+            await sock.sendMessage(senderID, { text: '❌ An error occurred. Type *!ats* to restart the bot.' });
         }
     });
 }
