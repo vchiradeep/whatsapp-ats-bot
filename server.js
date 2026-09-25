@@ -33,11 +33,20 @@ app.post('/webhook', async (req, res) => {
             const mediaUrl = req.body.MediaUrl0;
             const contentType = req.body.MediaContentType0 || '';
 
+            const accountSid = process.env.TWILIO_ACCOUNT_SID;
+            const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+            if (!accountSid || !authToken) {
+                throw new Error("TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing in Render environment variables!");
+            }
+
+            console.log(`Downloading media from: ${mediaUrl}`);
+
             const response = await axios.get(mediaUrl, {
                 responseType: 'arraybuffer',
                 auth: {
-                    username: process.env.TWILIO_ACCOUNT_SID,
-                    password: process.env.TWILIO_AUTH_TOKEN
+                    username: accountSid,
+                    password: authToken
                 }
             });
 
@@ -63,7 +72,7 @@ app.post('/webhook', async (req, res) => {
 
             twiml.message('📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.');
         } 
-        // Handle Job Description Text Input & AI Evaluation
+        // Handle Job Description Text Input & AI Evaluation using gemini-3.1-flash-lite
         else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
             if (!incomingMsg) {
                 twiml.message('⚠️ Please send a valid text Job Description.');
@@ -92,7 +101,7 @@ app.post('/webhook', async (req, res) => {
                 twiml.message('👋 Please upload your resume as a *PDF or Word document* to get started.');
             }
         } 
-        // Default / Welcome State (triggered by "hi" or any restart)
+        // Default / Welcome State
         else {
             userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
             twiml.message('👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.');
@@ -107,9 +116,9 @@ app.post('/webhook', async (req, res) => {
     return res.send(twiml.toString());
 });
 
-// Stable ATS Evaluation using gemini-1.5-flash
+// Rigorous ATS Evaluation using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
     const prompt = `
     You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
