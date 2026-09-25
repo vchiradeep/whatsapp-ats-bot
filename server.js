@@ -4,10 +4,11 @@ const axios = require('axios');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal');
 
-// 1. Express server to satisfy Render's web service health check
+// 1. Express server for Render health check
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -29,14 +30,20 @@ async function connectToWhatsApp() {
 
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' }), // Hide noisy logs
-        printQRInTerminal: true // Prints QR code in your Render logs for initial linking
+        logger: pino({ level: 'silent' })
     });
 
-    sock.льнай = sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
+        
+        // Render the QR code in the logs if it appears
+        if (qr) {
+            console.log('📌 Scan this QR code with WhatsApp:');
+            qrcode.generate(qr, { small: true });
+        }
+
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
@@ -55,9 +62,7 @@ async function connectToWhatsApp() {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        const senderID = msg.key.remoteJid; // e.g., '919032980320@s.whatsapp.net'
-        
-        // Extract message text or caption if it's a file
+        const senderID = msg.key.remoteJid;
         const incomingText = msg.message.conversation || 
                              msg.message.extendedTextMessage?.text || 
                              msg.message.documentMessage?.caption || '';
@@ -66,13 +71,11 @@ async function connectToWhatsApp() {
         let session = userSessions.get(senderID) || { step: 'WAITING_FOR_RESUME' };
 
         try {
-            // Check if user sent a document (PDF or Word)
             const documentMessage = msg.message.documentMessage;
 
             if (documentMessage && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
                 await sock.sendMessage(senderID, { text: '⏳ Downloading and processing your resume...' });
 
-                // Get media stream from Baileys
                 const stream = await downloadMediaMessage(msg, 'stream', {}, { logger: pino({ level: 'silent' }) });
                 let buffer = Buffer.from([]);
                 for await (const chunk of stream) {
@@ -102,7 +105,6 @@ async function connectToWhatsApp() {
 
                 await sock.sendMessage(senderID, { text: '📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to match it against.' });
             } 
-            // Handle Job Description Input
             else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
                 if (!trimmedText) {
                     await sock.sendMessage(senderID, { text: '⚠️ Please send a valid text Job Description.' });
@@ -123,7 +125,6 @@ async function connectToWhatsApp() {
                     text: evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)" 
                 });
             } 
-            // Handle Post-Score Menu
             else if (session.step === 'CHOICE_MENU') {
                 if (trimmedText === '2') {
                     session.step = 'WAITING_FOR_NEW_JD';
@@ -135,7 +136,6 @@ async function connectToWhatsApp() {
                     await sock.sendMessage(senderID, { text: '👋 Please upload your resume as a *PDF or Word document* to get started.' });
                 }
             } 
-            // Default / Welcome State (triggered by 'hi' or anything else)
             else {
                 userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
                 await sock.sendMessage(senderID, { text: '👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.' });
@@ -148,9 +148,6 @@ async function connectToWhatsApp() {
         }
     });
 }
-
-// Helper to download media in Baileys
-const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 
 // AI Scoring Function using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
