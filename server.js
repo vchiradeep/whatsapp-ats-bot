@@ -4,177 +4,114 @@ const axios = require('axios');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const pino = require('pino');
+const twilio = require('twilio');
 
 const app = express();
+app.use(express.urlencoded({ extended: false }));
+
 const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-    res.status(200).send('🤖 WhatsApp ATS Bot (Baileys) is running 24/7!');
-});
-
-app.listen(PORT, () => {
-    console.log(`🚀 Express server running on port ${PORT}`);
-});
-
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const userSessions = new Map();
 
-async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+app.get('/', (req, res) => {
+    res.status(200).send('🤖 Twilio WhatsApp ATS Bot is running 24/7!');
+});
 
-    const sock = makeWASocket({
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false
-    });
+// Twilio Webhook Endpoint
+app.post('/webhook', async (req, res) => {
+    const incomingMsg = req.body.Body ? req.body.Body.trim() : '';
+    const senderID = req.body.From; // e.g., 'whatsapp:+919032980320'
+    const numMedia = parseInt(req.body.NumMedia || '0', 10);
+    
+    let session = userSessions.get(senderID) || { step: 'WAITING_FOR_RESUME' };
+    const twiml = new twilio.twiml.MessagingResponse();
 
-    sock.ev.on('creds.update', saveCreds);
+    try {
+        // Handle incoming PDF or Word document from Twilio
+        if (numMedia > 0 && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
+            const mediaUrl = req.body.MediaUrl0;
+            const contentType = req.body.MediaContentType0 || '';
 
-    // If not registered, generate a Pairing Code using the environment variable
-    if (!sock.authState.creds.registered) {
-        const phoneNumber = process.env.BOT_PHONE_NUMBER;
-        if (phoneNumber) {
-            setTimeout(async () => {
-                try {
-                    console.log(`requesting pairing code for ${phoneNumber}...`);
-                    const code = await sock.requestPairingCode(phoneNumber);
-                    console.log(`\n========================================`);
-                    console.log(`🔑 YOUR WHATSAPP PAIRING CODE IS: ${code}`);
-                    console.log(`========================================\n`);
-                } catch (err) {
-                    console.error("Error getting pairing code:", err);
+            // Download file from Twilio using HTTP Basic Auth
+            const response = await axios.get(mediaUrl, {
+                responseType: 'arraybuffer',
+                auth: {
+                    username: process.env.TWILIO_ACCOUNT_SID,
+                    password: process.env.TWILIO_AUTH_TOKEN
                 }
-            }, 5000); // Wait 5 seconds for socket connection to initialize
-        } else {
-            console.log("⚠️ BOT_PHONE_NUMBER environment variable is missing in Render!");
+            });
+
+            const buffer = Buffer.from(response.data);
+            let extractedText = '';
+
+            if (contentType.includes('wordprocessingml') || mediaUrl.endsWith('.docx')) {
+                const result = await mammoth.extractRawText({ buffer });
+                extractedText = result.value;
+            } else {
+                const parsedPdf = await pdfParse(buffer);
+                extractedText = parsedPdf.text;
+            }
+
+            if (!extractedText || extractedText.trim().length === 0) {
+                twiml.message('⚠️ Could not extract text. Please upload a clear PDF or Word document.');
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                return res.end(twiml.toString());
+            }
+
+            session.resumeText = extractedText;
+            session.step = 'WAITING_FOR_JD';
+            userSessions.set(senderID, session);
+
+            twiml.message('📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.');
+        } 
+        // Handle Job Description Text Input
+        else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
+            if (!incomingMsg) {
+                twiml.message('⚠️ Please send a valid text Job Description.');
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                return res.end(twiml.toString());
+            }
+
+            session.jobDescription = incomingMsg;
+            userSessions.set(senderID, session);
+
+            // Run Gemini AI Evaluation
+            const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
+
+            session.step = 'CHOICE_MENU';
+            userSessions.set(senderID, session);
+
+            twiml.message(evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)");
+        } 
+        // Handle Post-Score Menu
+        else if (session.step === 'CHOICE_MENU') {
+            if (incomingMsg === '2') {
+                session.step = 'WAITING_FOR_NEW_JD';
+                userSessions.set(senderID, session);
+                twiml.message('📝 Please paste the *new Job Description* you want to test:');
+            } else {
+                session.step = 'WAITING_FOR_RESUME';
+                userSessions.set(senderID, session);
+                twiml.message('👋 Please upload your resume as a *PDF or Word document* to get started.');
+            }
+        } 
+        // Default / Welcome State
+        else {
+            userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
+            twiml.message('👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.');
         }
+
+    } catch (error) {
+        console.error("Webhook processing error:", error);
+        userSessions.delete(senderID);
+        twiml.message('❌ An error occurred. Send any message to restart.');
     }
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
-            if (shouldReconnect) {
-                connectToWhatsApp();
-            }
-        } else if (connection === 'open') {
-            console.log('✅ WhatsApp bot successfully connected and online!');
-        }
-    });
+    res.writeHead(200, { 'Content-Type': 'text/xml' });
+    res.end(twiml.toString());
+});
 
-    // Handle Incoming Messages
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const senderID = msg.key.remoteJid;
-        const incomingText = msg.message.conversation || 
-                             msg.message.extendedTextMessage?.text || 
-                             msg.message.documentMessage?.caption || '';
-        
-        const trimmedText = incomingText.trim();
-        const documentMessage = msg.message.documentMessage;
-
-        let session = userSessions.get(senderID);
-
-        if (!session) {
-            if (trimmedText.toLowerCase() === '!ats') {
-                session = { step: 'WAITING_FOR_RESUME' };
-                userSessions.set(senderID, session);
-                await sock.sendMessage(senderID, { text: '🤖 *ATS Bot Activated!*\n\nPlease upload your resume as a *PDF or Word document* to get started.\n\n*(Type **!exit** anytime to quit)*' });
-            }
-            return; 
-        }
-
-        if (trimmedText.toLowerCase() === '!exit') {
-            userSessions.delete(senderID);
-            await sock.sendMessage(senderID, { text: '❌ ATS Bot session closed. Your personal chat is back to normal.' });
-            return;
-        }
-
-        try {
-            if (documentMessage && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
-                await sock.sendMessage(senderID, { text: '⏳ Downloading and analyzing your resume structure...' });
-
-                const stream = await downloadMediaMessage(msg, 'stream', {}, { logger: pino({ level: 'silent' }) });
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
-                }
-
-                let extractedText = '';
-                const fileName = documentMessage.fileName || '';
-                const mimeType = documentMessage.mimetype || '';
-
-                if (mimeType.includes('wordprocessingml') || fileName.endsWith('.docx')) {
-                    const result = await mammoth.extractRawText({ buffer });
-                    extractedText = result.value;
-                } else {
-                    const parsedPdf = await pdfParse(buffer);
-                    extractedText = parsedPdf.text;
-                }
-
-                if (!extractedText || extractedText.trim().length === 0) {
-                    await sock.sendMessage(senderID, { text: '⚠️ Could not extract text. Please upload a clear PDF or Word document.' });
-                    return;
-                }
-
-                session.resumeText = extractedText;
-                session.step = 'WAITING_FOR_JD';
-                userSessions.set(senderID, session);
-
-                await sock.sendMessage(senderID, { text: '📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.' });
-            } 
-            else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
-                if (!trimmedText) {
-                    await sock.sendMessage(senderID, { text: '⚠️ Please send a valid text Job Description.' });
-                    return;
-                }
-
-                session.jobDescription = trimmedText;
-                userSessions.set(senderID, session);
-
-                await sock.sendMessage(senderID, { text: '⏳ *Running deep ATS keyword matching & gap analysis... Please wait.*' });
-
-                const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
-
-                session.step = 'CHOICE_MENU';
-                userSessions.set(senderID, session);
-
-                await sock.sendMessage(senderID, { 
-                    text: evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)\n3️⃣ Exit Bot (Reply with *!exit*)" 
-                });
-            } 
-            else if (session.step === 'CHOICE_MENU') {
-                if (trimmedText === '2') {
-                    session.step = 'WAITING_FOR_NEW_JD';
-                    userSessions.set(senderID, session);
-                    await sock.sendMessage(senderID, { text: '📝 Please paste the *new Job Description* you want to test:' });
-                } else {
-                    session.step = 'WAITING_FOR_RESUME';
-                    userSessions.set(senderID, session);
-                    await sock.sendMessage(senderID, { text: '👋 Please upload your resume as a *PDF or Word document* to get started.' });
-                }
-            } 
-            else {
-                userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
-                await sock.sendMessage(senderID, { text: '🤖 Please upload your resume as a *PDF or Word document* to get started.' });
-            }
-
-        } catch (error) {
-            console.error("Error processing message:", error);
-            userSessions.delete(senderID);
-            await sock.sendMessage(senderID, { text: '❌ An error occurred. Type *!ats* to restart the bot.' });
-        }
-    });
-}
-
+// Rigorous ATS Evaluation using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
     const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
@@ -214,4 +151,6 @@ async function evaluateWithGemini(resumeText, jobDescription) {
     return response.text();
 }
 
-connectToWhatsApp();
+app.listen(PORT, () => {
+    console.log(`🚀 Twilio ATS Bot server running on port ${PORT}`);
+});

@@ -1,20 +1,18 @@
 {
   "name": "whatsapp-ats-bot",
   "version": "1.0.0",
-  "description": "WhatsApp ATS Bot using Baileys and Gemini",
+  "description": "WhatsApp ATS Bot using Twilio and Gemini",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
-    "@whiskeysockets/baileys": "^6.7.9",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "mammoth": "^1.8.0",
     "pdf-parse": "^1.1.1",
-    "pino": "^9.6.0",
-    "qrcode-terminal": "^0.12.0"
+    "twilio": "^5.4.0"
   }
 }
