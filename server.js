@@ -71,7 +71,8 @@ app.post('/webhook', async (req, res) => {
             session.jobDescription = incomingMsg;
             userSessions.set(senderID, session);
 
-            const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
+            // Run evaluation with automatic model fallback
+            const evaluationResult = await evaluateWithFallback(session.resumeText, session.jobDescription);
 
             session.step = 'CHOICE_MENU';
             userSessions.set(senderID, session);
@@ -104,9 +105,11 @@ app.post('/webhook', async (req, res) => {
     res.end(twiml.toString());
 });
 
-// Rigorous ATS Evaluation using gemini-3.1-flash-lite
-async function evaluateWithGemini(resumeText, jobDescription) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
+// Robust Evaluation Function with Automatic Fallbacks
+async function evaluateWithFallback(resumeText, jobDescription) {
+    // List of models to try in order if one experiences high demand (503) or errors
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-1.5-flash', 'gemini-2.5-flash'];
+    let lastError = null;
 
     const prompt = `
     You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
@@ -139,9 +142,21 @@ async function evaluateWithGemini(resumeText, jobDescription) {
     ${jobDescription}
     `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
+    for (const modelName of modelsToTry) {
+        try {
+            console.log(`Trying model: ${modelName}`);
+            const model = genAI.getGenerativeModel({ model: modelName });
+            const result = await model.generateContent(prompt);
+            const response = await result.response;
+            return response.text(); // Success! Return the evaluation.
+        } catch (err) {
+            console.warn(`Model ${modelName} failed or busy:`, err.message);
+            lastError = err; // Save error and loop to the next model
+        }
+    }
+
+    // If all models failed, throw the final error
+    throw lastError;
 }
 
 app.listen(PORT, () => {
