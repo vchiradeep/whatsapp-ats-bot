@@ -6,7 +6,6 @@ const mammoth = require('mammoth');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,19 +26,35 @@ async function connectToWhatsApp() {
 
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' })
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            console.log('📌 Scan this QR code with WhatsApp:');
-            qrcode.generate(qr, { small: true });
+    // If not registered, generate a Pairing Code using the environment variable
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = process.env.BOT_PHONE_NUMBER;
+        if (phoneNumber) {
+            setTimeout(async () => {
+                try {
+                    console.log(`requesting pairing code for ${phoneNumber}...`);
+                    const code = await sock.requestPairingCode(phoneNumber);
+                    console.log(`\n========================================`);
+                    console.log(`🔑 YOUR WHATSAPP PAIRING CODE IS: ${code}`);
+                    console.log(`========================================\n`);
+                } catch (err) {
+                    console.error("Error getting pairing code:", err);
+                }
+            }, 5000); // Wait 5 seconds for socket connection to initialize
+        } else {
+            console.log("⚠️ BOT_PHONE_NUMBER environment variable is missing in Render!");
         }
+    }
 
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
@@ -51,6 +66,7 @@ async function connectToWhatsApp() {
         }
     });
 
+    // Handle Incoming Messages
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
@@ -67,17 +83,15 @@ async function connectToWhatsApp() {
 
         let session = userSessions.get(senderID);
 
-        // 🛡️ TRIGGER CHECK: If no active session, ignore unless they type '!ats'
         if (!session) {
             if (trimmedText.toLowerCase() === '!ats') {
                 session = { step: 'WAITING_FOR_RESUME' };
                 userSessions.set(senderID, session);
                 await sock.sendMessage(senderID, { text: '🤖 *ATS Bot Activated!*\n\nPlease upload your resume as a *PDF or Word document* to get started.\n\n*(Type **!exit** anytime to quit)*' });
             }
-            return; // Completely ignore normal personal messages!
+            return; 
         }
 
-        // Allow user to exit the bot session anytime
         if (trimmedText.toLowerCase() === '!exit') {
             userSessions.delete(senderID);
             await sock.sendMessage(senderID, { text: '❌ ATS Bot session closed. Your personal chat is back to normal.' });
@@ -161,7 +175,6 @@ async function connectToWhatsApp() {
     });
 }
 
-// Deep Rigorous ATS Scoring Function using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
     const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
