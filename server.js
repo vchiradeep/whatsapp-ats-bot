@@ -11,6 +11,7 @@ app.use(express.urlencoded({ extended: false }));
 
 const PORT = process.env.PORT || 3000;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const userSessions = new Map();
 
 app.get('/', (req, res) => {
@@ -18,15 +19,24 @@ app.get('/', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+    // Immediately reply to Twilio with 200 OK so it never times out
+    res.status(200).send('<Response></Response>');
+
     const incomingMsg = req.body.Body ? req.body.Body.trim() : '';
-    const senderID = req.body.From;
+    const senderID = req.body.From; // e.g. 'whatsapp:+91...'
+    const twilioNumber = req.body.To; // e.g. 'whatsapp:+14155238886'
     const numMedia = parseInt(req.body.NumMedia || '0', 10);
     
     let session = userSessions.get(senderID) || { step: 'WAITING_FOR_RESUME' };
-    const twiml = new twilio.twiml.MessagingResponse();
 
     try {
         if (numMedia > 0 && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: '⏳ Downloading and analyzing your resume structure...'
+            });
+
             const mediaUrl = req.body.MediaUrl0;
             const contentType = req.body.MediaContentType0 || '';
 
@@ -50,64 +60,99 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (!extractedText || extractedText.trim().length === 0) {
-                twiml.message('⚠️ Could not extract text. Please upload a clear PDF or Word document.');
-                res.writeHead(200, { 'Content-Type': 'text/xml' });
-                return res.end(twiml.toString());
+                await client.messages.create({
+                    from: twilioNumber,
+                    to: senderID,
+                    body: '⚠️ Could not extract text. Please upload a clear PDF or Word document.'
+                });
+                return;
             }
 
             session.resumeText = extractedText;
             session.step = 'WAITING_FOR_JD';
             userSessions.set(senderID, session);
 
-            twiml.message('📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.');
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: '📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.'
+            });
         } 
         else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
             if (!incomingMsg) {
-                twiml.message('⚠️ Please send a valid text Job Description.');
-                res.writeHead(200, { 'Content-Type': 'text/xml' });
-                return res.end(twiml.toString());
+                await client.messages.create({
+                    from: twilioNumber,
+                    to: senderID,
+                    body: '⚠️ Please send a valid text Job Description.'
+                });
+                return;
             }
 
             session.jobDescription = incomingMsg;
             userSessions.set(senderID, session);
 
-            // Run evaluation with automatic model fallback
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: '⏳ *Running deep ATS keyword matching & gap analysis... Please wait.*'
+            });
+
             const evaluationResult = await evaluateWithFallback(session.resumeText, session.jobDescription);
 
             session.step = 'CHOICE_MENU';
             userSessions.set(senderID, session);
 
-            twiml.message(evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)");
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: evaluationResult + "\n\n──────────────────\n🔄 *What would you like to do next?*\n\n1️⃣ Upload another resume (Send a new PDF/Word file)\n2️⃣ Change Job Description (Reply with *2*)"
+            });
         } 
         else if (session.step === 'CHOICE_MENU') {
             if (incomingMsg === '2') {
                 session.step = 'WAITING_FOR_NEW_JD';
                 userSessions.set(senderID, session);
-                twiml.message('📝 Please paste the *new Job Description* you want to test:');
+                await client.messages.create({
+                    from: twilioNumber,
+                    to: senderID,
+                    body: '📝 Please paste the *new Job Description* you want to test:'
+                });
             } else {
                 session.step = 'WAITING_FOR_RESUME';
                 userSessions.set(senderID, session);
-                twiml.message('👋 Please upload your resume as a *PDF or Word document* to get started.');
+                await client.messages.create({
+                    from: twilioNumber,
+                    to: senderID,
+                    body: '👋 Please upload your resume as a *PDF or Word document* to get started.'
+                });
             }
         } 
         else {
             userSessions.set(senderID, { step: 'WAITING_FOR_RESUME' });
-            twiml.message('👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.');
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: '👋 *Welcome to WhatsApp ATS Score Teller!*\n\nPlease upload your resume as a *PDF or Word document* to get started.'
+            });
         }
 
     } catch (error) {
         console.error("Webhook processing error details:", error);
         userSessions.delete(senderID);
-        twiml.message(`❌ Error: ${error.message || 'An error occurred. Send any message to restart.'}`);
+        try {
+            await client.messages.create({
+                from: twilioNumber,
+                to: senderID,
+                body: `❌ Error: ${error.message || 'An error occurred. Send any message to restart.'}`
+            });
+        } catch (sendErr) {
+            console.error("Failed to send error message:", sendErr);
+        }
     }
-
-    res.writeHead(200, { 'Content-Type': 'text/xml' });
-    res.end(twiml.toString());
 });
 
 // Robust Evaluation Function with Automatic Fallbacks
 async function evaluateWithFallback(resumeText, jobDescription) {
-    // List of models to try in order if one experiences high demand (503) or errors
     const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-1.5-flash', 'gemini-2.5-flash'];
     let lastError = null;
 
@@ -148,14 +193,13 @@ async function evaluateWithFallback(resumeText, jobDescription) {
             const model = genAI.getGenerativeModel({ model: modelName });
             const result = await model.generateContent(prompt);
             const response = await result.response;
-            return response.text(); // Success! Return the evaluation.
+            return response.text();
         } catch (err) {
             console.warn(`Model ${modelName} failed or busy:`, err.message);
-            lastError = err; // Save error and loop to the next model
+            lastError = err;
         }
     }
 
-    // If all models failed, throw the final error
     throw lastError;
 }
 
