@@ -38,7 +38,6 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // Render the QR code in the logs if it appears
         if (qr) {
             console.log('📌 Scan this QR code with WhatsApp:');
             qrcode.generate(qr, { small: true });
@@ -74,7 +73,7 @@ async function connectToWhatsApp() {
             const documentMessage = msg.message.documentMessage;
 
             if (documentMessage && (session.step === 'WAITING_FOR_RESUME' || session.step === 'CHOICE_MENU')) {
-                await sock.sendMessage(senderID, { text: '⏳ Downloading and processing your resume...' });
+                await sock.sendMessage(senderID, { text: '⏳ Downloading and analyzing your resume structure...' });
 
                 const stream = await downloadMediaMessage(msg, 'stream', {}, { logger: pino({ level: 'silent' }) });
                 let buffer = Buffer.from([]);
@@ -103,7 +102,7 @@ async function connectToWhatsApp() {
                 session.step = 'WAITING_FOR_JD';
                 userSessions.set(senderID, session);
 
-                await sock.sendMessage(senderID, { text: '📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to match it against.' });
+                await sock.sendMessage(senderID, { text: '📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.' });
             } 
             else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
                 if (!trimmedText) {
@@ -114,7 +113,7 @@ async function connectToWhatsApp() {
                 session.jobDescription = trimmedText;
                 userSessions.set(senderID, session);
 
-                await sock.sendMessage(senderID, { text: '⏳ *Analyzing your resume against the Job Description... Please wait.*' });
+                await sock.sendMessage(senderID, { text: '⏳ *Running deep ATS keyword matching & gap analysis... Please wait.*' });
 
                 const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
 
@@ -149,28 +148,33 @@ async function connectToWhatsApp() {
     });
 }
 
-// AI Scoring Function using gemini-3.1-flash-lite
+// Deep Rigorous ATS Scoring Function using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
     const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
     const prompt = `
-    You are an expert ATS (Applicant Tracking System) and hiring manager. 
-    Analyze the following Resume against the Job Description.
+    You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
 
-    Provide your response in this exact format, optimized for WhatsApp readability:
+    Provide a highly detailed, professional breakdown optimized for WhatsApp readability using this exact format:
+
     📊 *ATS Match Score:* [0-100]%
     
-    ✅ *Key Strengths:*
-    - [Point 1]
-    - [Point 2]
+    🎯 *Core Alignment Summary:*
+    - [1-2 sharp sentences analyzing why it earned this score and overall fit]
+
+    ✅ *Key Matched Strengths:*
+    - [Specific matched skill or tool found in the resume]
+    - [Another strength demonstrating clear alignment with the role]
+    - [Another matched domain knowledge or experience point]
     
-    ❌ *Missing Keywords / Gaps:*
-    - [Point 1]
-    - [Point 2]
+    ❌ *Critical Gaps & Missing Keywords:*
+    - [Specific technical skill, tool, framework, or qualification required by the JD that is missing from the resume]
+    - [Specific missing experience or metric gap]
     
-    💡 *Actionable Improvements:*
-    - [Tip 1]
-    - [Tip 2]
+    💡 *High-Impact Actionable Improvements:*
+    - [Concrete fix 1: Exactly what bullet point or section to add/modify]
+    - [Concrete fix 2: Specific keyword placement recommendation to bypass automated filters]
+    - [Concrete fix 3: Structural or formatting adjustment to raise the score]
 
     Resume Text:
     ${resumeText}
