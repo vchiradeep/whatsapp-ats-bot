@@ -61,7 +61,7 @@ app.post('/webhook', async (req, res) => {
 
             twiml.message('📄 *Resume received successfully!*\n\nNow, please paste or send the *Job Description (JD)* you want to evaluate it against.');
         } 
-        // Handle Job Description Text Input & AI Evaluation with Fallbacks
+        // Handle Job Description Text Input & AI Evaluation using gemini-3.8-flash
         else if (session.step === 'WAITING_FOR_JD' || session.step === 'WAITING_FOR_NEW_JD') {
             if (!incomingMsg) {
                 twiml.message('⚠️ Please send a valid text Job Description.');
@@ -71,7 +71,7 @@ app.post('/webhook', async (req, res) => {
             session.jobDescription = incomingMsg;
             userSessions.set(senderID, session);
 
-            const evaluationResult = await evaluateWithFallback(session.resumeText, session.jobDescription);
+            const evaluationResult = await evaluateWithGemini(session.resumeText, session.jobDescription);
 
             session.step = 'CHOICE_MENU';
             userSessions.set(senderID, session);
@@ -105,10 +105,9 @@ app.post('/webhook', async (req, res) => {
     return res.send(twiml.toString());
 });
 
-// Robust Evaluation Function with Automatic Model Fallbacks
-async function evaluateWithFallback(resumeText, jobDescription) {
-    const modelsToTry = ['gemini-1.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
-    let lastError = null;
+// Rigorous ATS Evaluation using gemini-3.8-flash
+async function evaluateWithGemini(resumeText, jobDescription) {
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.8-flash' });
 
     const prompt = `
     You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
@@ -141,20 +140,9 @@ async function evaluateWithFallback(resumeText, jobDescription) {
     ${jobDescription}
     `;
 
-    for (const modelName of modelsToTry) {
-        try {
-            console.log(`Trying model: ${modelName}`);
-            const model = genAI.getGenerativeModel({ model: modelName });
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            return response.text();
-        } catch (err) {
-            console.warn(`Model ${modelName} failed or busy:`, err.message);
-            lastError = err;
-        }
-    }
-
-    throw lastError;
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
 }
 
 app.listen(PORT, () => {
