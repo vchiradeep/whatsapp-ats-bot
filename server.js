@@ -104,9 +104,9 @@ app.post('/webhook', async (req, res) => {
     res.end(twiml.toString());
 });
 
-// Rigorous ATS Evaluation using gemini-2.5-flash
+// Rigorous ATS Evaluation using gemini-3.1-flash-lite
 async function evaluateWithGemini(resumeText, jobDescription) {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 
     const prompt = `
     You are an elite, strict Applicant Tracking System (ATS) algorithm and a Senior Technical Hiring Manager. Conduct a deep, rigorous evaluation of the Resume against the Job Description.
